@@ -12,7 +12,7 @@ Adjust these parameters to optimize performance and accuracy
 # Higher value = more lenient matching (allows less similar results)
 # Recommended range: 0.8 - 1.5
 # Start with 1.2 and adjust based on your testing
-VECTOR_DISTANCE_THRESHOLD = 0.8  # Stricter matching to avoid irrelevant chunks
+VECTOR_DISTANCE_THRESHOLD = 0.5  # Stricter matching to avoid irrelevant chunks
 
 # Number of chunks to retrieve from vector database
 # More chunks = more context but slower response

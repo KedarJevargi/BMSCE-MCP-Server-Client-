@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time  # <-- ADDED IMPORT
 from typing import Optional, Dict, Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -116,7 +117,7 @@ class MCPClient:
     async def make_natural_response(self, user_query: str, raw_data: str):
         """Convert raw JSON data into natural, student-friendly response"""
 
-        # Optimized prompt - **CRITICAL: Added aggressive filtering instruction**
+        # Optimized prompt
         prompt = f"""You are BMSCE Assistant, a friendly AI for BMS College students.
 
 Student asked: "{user_query}"
@@ -138,25 +139,50 @@ Your response:"""
 
         await self.generate_response(prompt, RESPONSE_TEMPERATURE, RESPONSE_MAX_TOKENS)
 
+    # --- START OF REPLACED FUNCTION ---
     async def _handle_chat_fallback(self, user_message: str, error_message: str = None):
         """
         Handles the conversational response when no tool is selected or a tool fails.
         """
-        # Optimized chat prompt - **CRITICAL: Added hallucination prevention rule**
+        
+        # *** START OF FIX ***
+        # If error_message is present, it means a tool call failed.
+        # We print a safe, static message instead of re-prompting the LLM.
+        # This completely prevents hallucination on tool failure.
+        if error_message:
+            response_text = "I don't have that specific information in my database. Can I help with anything else? 😊"
+            
+            # We can't use self.generate_response as that calls the LLM.
+            # We will just print the static text, mimicking streaming if enabled.
+            if ENABLE_STREAMING:
+                for char in response_text:
+                    print(char, end='', flush=True)
+                    time.sleep(0.015) # Adjust delay as needed
+                print("\n")
+            else:
+                print(f"{response_text}\n")
+            
+            return # <-- Most important part: exit before LLM call
+        # *** END OF FIX ***
+
+        # This code will NOW ONLY run for casual chat (e.g., "hi", "how are you")
+        # because the 'if error_message:' block above will catch all tool failures.
+        
+        # Optimized chat prompt
         chat_prompt = f"""You are BMSCE Assistant for BMS College students.
 
-User: {user_message}
-{f"The previous attempt to find information failed with: '{error_message}'. Do NOT mention this error to the user." if error_message else ""}
+    User: {user_message}
 
-Respond warmly and concisely. 
-No markdown formatting. Do not use any Markdown formatting like bolding (`**...**`) or italics.
-Focus ONLY on answering the user's message.
-**CRITICAL RULE: If you cannot find the answer in the provided tools/data, state clearly that you do not have that specific information, and DO NOT fabricate names, roles, or details.**
+    Respond warmly and concisely. 
+    No markdown formatting. Do not use any Markdown formatting like bolding (`**...**`) or italics.
+    Focus ONLY on answering the user's message.
+    CRITICAL RULE: If you are asked for specific information (names, dates, etc.) and don't know it, state clearly that you do not have that specific information. DO NOT fabricate.
 
-Response:"""
+    Response:"""
         
-        # Generate chat response (with or without streaming based on config)
+        # Generate chat response
         await self.generate_response(chat_prompt, CHAT_TEMPERATURE, CHAT_MAX_TOKENS)
+    # --- END OF REPLACED FUNCTION ---
 
     async def chat_with_mistral(self, user_message: str):
         """
@@ -169,7 +195,8 @@ Response:"""
 Tools:
 1. get_latest_news - news, events, festivals, workshops
 2. get_college_notifications - official notices, announcements, deadlines
-3. query_knowledge_base - search syllabus, academic topics,clubs,research and development,exams, rules and regulations  (requires "query_text")
+3. query_knowledge_base - search syllabus,academic topics,clubs,research and development,exams, rules and regulations, governance structure
+  (requires "query_text")
 4. get_professor_details - professor info (requires "name")
 5. none - greetings, casual chat
 
@@ -233,8 +260,10 @@ JSON:"""
             
             if is_error:
                 # CRITICAL: Do NOT print the raw error message to the user!
-                print(f"🤔 The search for that information didn't return a result. Let me try answering conversationally.")
-                await self._handle_chat_fallback(user_message, raw_data)
+                # --- MODIFIED PRINT ---
+                print(f"🤔 The search for that information didn't return a result.")
+                # --- END MODIFIED PRINT ---
+                await self._handle_chat_fallback(user_message, raw_data) # Pass the error
                 return
 
             # 5. Generate the natural response
@@ -243,7 +272,7 @@ JSON:"""
         except Exception as e:
             print(f"Oops! I had trouble getting that information. Could you try asking in a different way? 😊\n")
             # Fallback on connection/tool execution error
-            await self._handle_chat_fallback(user_message, f"Tool execution failed: {e}")
+            await self.make_natural_response(user_message, f"Tool execution failed: {e}")
 
     def _extract_tool_call(self, text: str) -> Optional[dict]:
         """Extract tool call from LLM response"""
@@ -282,6 +311,8 @@ async def main():
     print("🎓 " * 20 + "\n")
 
     try:
+        # --- IMPORTANT ---
+        # Make sure "main.py" is the name of your MCP *server* script
         await client.connect_to_server("main.py")
 
         print("💬 Hey there! Ask me about college events, notifications, or anything else!")
