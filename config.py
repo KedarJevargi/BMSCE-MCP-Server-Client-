@@ -12,12 +12,12 @@ Adjust these parameters to optimize performance and accuracy
 # Higher value = more lenient matching (allows less similar results)
 # Recommended range: 0.8 - 1.5
 # Start with 1.2 and adjust based on your testing
-VECTOR_DISTANCE_THRESHOLD = 0.5  # Stricter matching to avoid irrelevant chunks
+VECTOR_DISTANCE_THRESHOLD = 1.2  # Stricter matching to avoid irrelevant chunks
 
 # Number of chunks to retrieve from vector database
 # More chunks = more context but slower response
 # Recommended: 3-5
-VECTOR_N_RESULTS = 5  # Get more chunks but filter strictly by threshold
+VECTOR_N_RESULTS = 3  # Get more chunks but filter strictly by threshold
 
 # Chunk size for splitting documents
 # Larger chunks = more context per chunk but fewer chunks
@@ -28,7 +28,7 @@ VECTOR_CHUNK_SIZE = 600  # Smaller chunks for more precise matching
 # Overlap between chunks
 # Higher overlap = better context continuity but more chunks
 # Recommended: 10-20% of chunk size
-VECTOR_CHUNK_OVERLAP = 100
+VECTOR_CHUNK_OVERLAP = 60
 
 # Batch size for adding documents to vector DB
 # Higher = faster initial indexing but more memory
@@ -59,7 +59,7 @@ TOOL_SELECTION_MAX_TOKENS = 50
 
 # Maximum tokens for natural responses
 # Lower = faster but potentially cut-off responses
-RESPONSE_MAX_TOKENS = 400  # Increased for complete answers
+RESPONSE_MAX_TOKENS = 1000  # Increased for complete answers
 
 # Maximum tokens for casual chat
 # Lower = faster, more concise chat

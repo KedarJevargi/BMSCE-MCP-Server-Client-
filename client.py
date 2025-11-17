@@ -1,15 +1,12 @@
 import asyncio
 import json
 import sys
-import time  # <-- ADDED IMPORT
+import time
 from typing import Optional, Dict, Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-# For Ollama integration
 import ollama
 
-# Import configuration
 from config import (
     LLM_MODEL, TOOL_SELECTION_TEMPERATURE, RESPONSE_TEMPERATURE,
     CHAT_TEMPERATURE, TOOL_SELECTION_MAX_TOKENS, RESPONSE_MAX_TOKENS,
@@ -22,205 +19,144 @@ class MCPClient:
         self.available_tools = []
         self.client_context = None
         self.session_context = None
-        # Map tools that require arguments for easy validation
+        # Map tools for validation
         self.tool_arg_map = {
             'query_knowledge_base': ['query_text'],
-            'get_professor_details': ['name']
+            'get_professor_details': ['name'],
+            'get_syllabus_info': ['query_type', 'search_term']
         }
 
     async def connect_to_server(self, server_script_path: str):
-        """Connect to the MCP server"""
         server_params = StdioServerParameters(
             command="python",
             args=[server_script_path],
             env=None
         )
-
         self.client_context = stdio_client(server_params)
         self.stdio, self.write = await self.client_context.__aenter__()
-
         self.session_context = ClientSession(self.stdio, self.write)
         self.session = await self.session_context.__aenter__()
-
         await self.session.initialize()
-
         response = await self.session.list_tools()
         self.available_tools = response.tools
         print(f"✅ Connected to MCP Server\n")
 
     async def process_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """Execute a tool call on the MCP server"""
         if not self.session:
             raise RuntimeError("Not connected to server")
-
         result = await self.session.call_tool(tool_name, tool_args)
         return result.content[0].text
 
-    def get_tools_for_llm(self) -> str:
-        """Convert MCP tools to natural language description"""
-        tools_desc = []
-        for tool in self.available_tools:
-            desc = f"- {tool.name}: {tool.description}"
-            tools_desc.append(desc)
-        return "\n".join(tools_desc)
-
     async def generate_response(self, prompt: str, temperature: float, max_tokens: int):
-        """Generate response with optional streaming based on config"""
-        
         if ENABLE_STREAMING:
-            # Stream the response
             try:
                 stream = ollama.generate(
-                    model=LLM_MODEL,
-                    prompt=prompt,
-                    stream=True,
-                    options={
-                        "temperature": temperature,
-                        "top_p": TOP_P,
-                        "num_predict": max_tokens,
-                    }
+                    model=LLM_MODEL, prompt=prompt, stream=True,
+                    options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
                 )
-
                 for chunk in stream:
                     if 'response' in chunk:
                         print(chunk['response'], end='', flush=True)
-                
-                print("\n")  # Add newline at the end
-                
+                print("\n")
             except Exception as e:
-                print(f"Error during streaming: {e}")
-                # Fallback to non-streaming
-                print("Falling back to non-streaming...")
+                print(f"Streaming error: {e}. Fallback to non-streaming.")
                 response = ollama.generate(
-                    model=LLM_MODEL,
-                    prompt=prompt,
-                    options={
-                        "temperature": temperature,
-                        "top_p": TOP_P,
-                        "num_predict": max_tokens,
-                    }
+                    model=LLM_MODEL, prompt=prompt,
+                    options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
                 )
                 print(f"{response['response'].strip()}\n")
         else:
-            # Non-streaming response
             response = ollama.generate(
-                model=LLM_MODEL,
-                prompt=prompt,
-                options={
-                    "temperature": temperature,
-                    "top_p": TOP_P,
-                    "num_predict": max_tokens,
-                }
+                model=LLM_MODEL, prompt=prompt,
+                options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
             )
             print(f"{response['response'].strip()}\n")
 
     async def make_natural_response(self, user_query: str, raw_data: str):
-        """Convert raw JSON data into natural, student-friendly response"""
+        # --- UNIVERSAL STRICT FILTERING PROMPT ---
+        prompt = f"""You are a precise information assistant for BMSCE.
 
-        # Optimized prompt
-        prompt = f"""You are BMSCE Assistant, a friendly AI for BMS College students.
+USER QUESTION: "{user_query}"
 
-Student asked: "{user_query}"
-
-Data retrieved:
+RETRIEVED KNOWLEDGE BASE DATA:
 {raw_data}
 
-Present this naturally and conversationally. Use neutral pronouns (they/them) for people.
+--- INSTRUCTIONS ---
+1. FILTER STRICTLY: The data above may contain lists of multiple items.
+2. SELECT ONLY: Extract *only* the specific information that answers the User Question.
+3. IGNORE OTHERS: If the data lists "Item A, Item B" and the user asked about "Item B", DO NOT mention A.
+4. FORMAT: Present the answer cleanly. Use bullet points only for details regarding the *specific* topic requested.
+5. UNKNOWN: If the retrieved data does not contain the answer, say "I couldn't find specific details about that in my database."
 
-Guidelines:
-- Be warm and helpful like a senior student
-- Use clear numbering or bullet points for lists
-- **Crucially: Only include coherent, well-formed contact details (Name, Role, Contact). Aggressively filter out and discard any fragmented, garbled, or unformatted text fragments.**
-- Keep it concise but informative
-- Use emojis sparingly
-- End with a friendly note if appropriate
+Your Response:"""
+        
+        await self.generate_response(prompt, 0.4, RESPONSE_MAX_TOKENS)
 
-Your response:"""
-
-        await self.generate_response(prompt, RESPONSE_TEMPERATURE, RESPONSE_MAX_TOKENS)
-
-    # --- START OF REPLACED FUNCTION ---
     async def _handle_chat_fallback(self, user_message: str, error_message: str = None):
-        """
-        Handles the conversational response when no tool is selected or a tool fails.
-        """
-        
-        # *** START OF FIX ***
-        # If error_message is present, it means a tool call failed.
-        # We print a safe, static message instead of re-prompting the LLM.
-        # This completely prevents hallucination on tool failure.
-        if error_message:
-            response_text = "I don't have that specific information in my database. Can I help with anything else? 😊"
-            
-            # We can't use self.generate_response as that calls the LLM.
-            # We will just print the static text, mimicking streaming if enabled.
-            if ENABLE_STREAMING:
-                for char in response_text:
-                    print(char, end='', flush=True)
-                    time.sleep(0.015) # Adjust delay as needed
-                print("\n")
-            else:
-                print(f"{response_text}\n")
-            
-            return # <-- Most important part: exit before LLM call
-        # *** END OF FIX ***
+        # If error is just "No results", be helpful.
+        if error_message and "found" in error_message.lower():
+             print("I checked my database, but I couldn't find that specific information.\n")
+             return
 
-        # This code will NOW ONLY run for casual chat (e.g., "hi", "how are you")
-        # because the 'if error_message:' block above will catch all tool failures.
-        
-        # Optimized chat prompt
-        chat_prompt = f"""You are BMSCE Assistant for BMS College students.
-
+        chat_prompt = f"""You are BMSCE Assistant.
     User: {user_message}
-
-    Respond warmly and concisely. 
-    No markdown formatting. Do not use any Markdown formatting like bolding (`**...**`) or italics.
-    Focus ONLY on answering the user's message.
-    CRITICAL RULE: If you are asked for specific information (names, dates, etc.) and don't know it, state clearly that you do not have that specific information. DO NOT fabricate.
-
+    Respond warmly and concisely. No markdown unless necessary.
     Response:"""
-        
-        # Generate chat response
         await self.generate_response(chat_prompt, CHAT_TEMPERATURE, CHAT_MAX_TOKENS)
-    # --- END OF REPLACED FUNCTION ---
+
+    def _sanitize_tool_args(self, tool_name: str, tool_args: dict, user_message: str) -> dict:
+        """
+        Fixes common LLM mistakes in argument generation.
+        """
+        # Fix 1: get_syllabus_info missing query_type
+        if tool_name == 'get_syllabus_info':
+            if 'query_type' not in tool_args:
+                # Default to subject_detail if implied
+                tool_args['query_type'] = 'subject_detail'
+            
+            if 'search_term' not in tool_args:
+                # Fallback: Use the whole user message as search term if missing
+                # This captures "Software Engineering" from "Is there software engineering"
+                # removing common stop words roughly
+                clean_term = user_message.lower().replace("is there", "").replace("any", "").replace("subject", "").strip()
+                tool_args['search_term'] = clean_term
+
+        # Fix 2: get_professor_details missing name
+        if tool_name == 'get_professor_details':
+            if 'name' not in tool_args:
+                 # Try to grab the name from the query
+                 clean_name = user_message.lower().replace("who is", "").replace("professor", "").replace("email", "").strip()
+                 tool_args['name'] = clean_name
+
+        return tool_args
 
     async def chat_with_mistral(self, user_message: str):
-        """
-        Chat with Mistral using MCP tools with improved tool selection and error handling.
-        """
-
-        # Optimized decision prompt - STRICT JSON output requested
-        decision_prompt = f"""Analyze the user's question and select the single BEST tool to answer it.
+        # Decision prompt 
+        decision_prompt = f"""Analyze the user's question and select the BEST tool.
 
 Tools:
-1. get_latest_news - news, events, festivals, workshops
-2. get_college_notifications - official notices, announcements, deadlines
-3. query_knowledge_base - search syllabus,academic topics,clubs,research and development,exams, rules and regulations, governance structure
-  (requires "query_text")
-4. get_professor_details - professor info (requires "name")
-5. none - greetings, casual chat
+1. get_latest_news - news, events
+2. get_college_notifications - official notices
+3. query_knowledge_base - generic search (clubs, rules, history, campus, hostels). Usage: {{"tool": "query_knowledge_base", "arguments": {{"query_text": "search query"}}}}
+4. get_professor_details - email/phone of profs (requires "name")
+5. get_syllabus_info - syllabus/subjects. Usage:
+   - "subjects in 5th sem" -> {{"tool": "get_syllabus_info", "arguments": {{"query_type": "semester_list", "search_term": "5"}}}}
+   - "is there any software engineering subject" -> {{"tool": "get_syllabus_info", "arguments": {{"query_type": "subject_detail", "search_term": "software engineering"}}}}
+   - "details of DBMS" -> {{"tool": "get_syllabus_info", "arguments": {{"query_type": "subject_detail", "search_term": "DBMS"}}}}
+6. none - greetings, casual chat
 
 Question: "{user_message}"
 
-Respond ONLY with a JSON object. Do not include any text, thoughts, or markdown code fences (```json).
-The JSON must follow this structure: {{"tool": "tool_name", "arguments": {{"arg1": "value1", ...}}}}
-
+Respond ONLY with a JSON object: {{"tool": "tool_name", "arguments": {{...}}}}
 JSON:"""
 
-        # Run with lower temperature for faster, more deterministic responses
         decision_response = ollama.generate(
-            model=LLM_MODEL,
-            prompt=decision_prompt,
-            options={
-                "temperature": TOOL_SELECTION_TEMPERATURE,
-                "top_p": 0.5,
-                "num_predict": TOOL_SELECTION_MAX_TOKENS,
-            }
+            model=LLM_MODEL, prompt=decision_prompt,
+            options={"temperature": TOOL_SELECTION_TEMPERATURE, "top_p": 0.5, "num_predict": TOOL_SELECTION_MAX_TOKENS}
         )
 
         tool_call = self._extract_tool_call(decision_response['response'])
         
-        # 1. Handle 'none' tool or failed extraction
         if not tool_call or tool_call.get('tool') == 'none':
             await self._handle_chat_fallback(user_message)
             return
@@ -228,118 +164,78 @@ JSON:"""
         tool_name = tool_call.get('tool')
         tool_args = tool_call.get('arguments', {})
 
-        # 2. Basic Argument Validation 
+        # --- NEW STEP: Sanitize Arguments ---
+        # This fixes the "Missing arguments" crash by auto-filling missing keys
+        tool_args = self._sanitize_tool_args(tool_name, tool_args, user_message)
+
+        # Strict Validation (Last Line of Defense)
         required_args = self.tool_arg_map.get(tool_name)
         if required_args and not all(arg in tool_args and tool_args[arg] for arg in required_args):
-            print(f"⚠️ Tool selected: '{tool_name}', but missing required arguments or arguments were empty. Falling back to chat.\n")
-            await self._handle_chat_fallback(user_message, f"Tool selection failed due to missing arguments for {tool_name}.")
+            print(f"⚠️ Missing arguments for {tool_name} even after sanitization. Fallback to chat.\n")
+            await self._handle_chat_fallback(user_message, "Missing args")
             return
 
-        # 3. Process Tool Call
         try:
-            # Show a loading indicator
             print("🔍 Searching...", end='', flush=True)
             raw_data = await self.process_tool_call(tool_name, tool_args)
-            print("\r" + " " * 20 + "\r", end='', flush=True) # Clear the loading message
+            print("\r" + " " * 20 + "\r", end='', flush=True)
             
-            # 4. Error/No Results Detection and Graceful Fallback
+            # Basic error checking
             is_error = False
             try:
                 data_json = json.loads(raw_data)
-                
-                # Check for explicit error or 'not found' messages from the server tools
-                if isinstance(data_json, dict):
-                    error_message = data_json.get('error', '').lower()
-                    if 'error' in data_json or 'not found' in error_message:
-                        is_error = True
+                if isinstance(data_json, dict) and ('error' in data_json):
+                    is_error = True
+                    # If "ambiguous" or "tips", it's not a hard error, let LLM explain
+                    if "ambiguous" in str(data_json.get('error')).lower() or "tip" in str(data_json): 
+                        is_error = False 
                 elif isinstance(data_json, list) and len(data_json) == 0:
                     is_error = True
-                        
-            except json.JSONDecodeError:
-                pass  # Not JSON, proceed with natural response
+            except:
+                pass
             
             if is_error:
-                # CRITICAL: Do NOT print the raw error message to the user!
-                # --- MODIFIED PRINT ---
-                print(f"🤔 The search for that information didn't return a result.")
-                # --- END MODIFIED PRINT ---
-                await self._handle_chat_fallback(user_message, raw_data) # Pass the error
+                print(f"🤔 The search didn't return a result.")
+                await self._handle_chat_fallback(user_message, raw_data)
                 return
 
-            # 5. Generate the natural response
             await self.make_natural_response(user_message, raw_data)
 
         except Exception as e:
-            print(f"Oops! I had trouble getting that information. Could you try asking in a different way? 😊\n")
-            # Fallback on connection/tool execution error
-            await self.make_natural_response(user_message, f"Tool execution failed: {e}")
+            print(f"Oops! Trouble getting info. {e}\n")
+            await self.make_natural_response(user_message, f"Error: {e}")
 
     def _extract_tool_call(self, text: str) -> Optional[dict]:
-        """Extract tool call from LLM response"""
-        # Improved extraction
         try:
             text = text.replace('```json', '').replace('```', '').strip()
             start = text.find('{')
             end = text.rfind('}') + 1
-            
             if start != -1 and end > start:
-                json_str = text[start:end]
-                tool_call = json.loads(json_str)
-                if 'tool' in tool_call and 'arguments' in tool_call:
-                    return tool_call
+                return json.loads(text[start:end])
         except:
             pass
         return None
 
     async def close(self):
-        """Close the connection"""
-        if hasattr(self, 'session_context') and self.session_context:
-            await self.session_context.__aexit__(None, None, None)
-        if hasattr(self, 'client_context') and self.client_context:
-            await self.client_context.__aexit__(None, None, None)
-
+        if self.session_context: await self.session_context.__aexit__(None, None, None)
+        if self.client_context: await self.client_context.__aexit__(None, None, None)
 
 async def main():
     client = MCPClient()
-
-    streaming_status = "with streaming!" if ENABLE_STREAMING else "without streaming"
-    
-    print("\n" + "🎓 " * 20)
-    print("\n   Welcome to BMSCE Assistant! 🤖")
-    print(f"   Your friendly AI helper for all things BMS College")
-    print(f"   (Running {streaming_status})\n")
-    print("🎓 " * 20 + "\n")
-
+    print("\n🎓 BMSCE Assistant (Robust & Universal) 🤖\n")
     try:
-        # --- IMPORTANT ---
-        # Make sure "main.py" is the name of your MCP *server* script
         await client.connect_to_server("main.py")
-
-        print("💬 Hey there! Ask me about college events, notifications, or anything else!")
-        print("   Type 'quit' or 'exit' when you're done.\n")
-        print("─" * 60 + "\n")
-
         while True:
             user_input = input("You: ").strip()
-
-            if user_input.lower() in ['quit', 'exit', 'bye', 'goodbye']:
-                print("\n👋 See you later! Have an awesome day! 🌟\n")
-                break
-
-            if not user_input:
-                continue
-
+            if user_input.lower() in ['quit', 'exit']: break
+            if not user_input: continue
             print()
             await client.chat_with_mistral(user_input)
             print("─" * 60 + "\n")
-
-    except KeyboardInterrupt:
-        print("\n\n👋 Catch you later! Take care! 🌟\n")
     except Exception as e:
-        print(f"\nFATAL ERROR: Failed to run client or connect to server. Details: {e}")
+        print(f"FATAL ERROR: {e}")
     finally:
         await client.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
