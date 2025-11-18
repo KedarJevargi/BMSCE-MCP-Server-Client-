@@ -82,6 +82,7 @@ RETRIEVED KNOWLEDGE BASE DATA:
 {raw_data}
 
 --- INSTRUCTIONS ---
+0. Use only common nouns and gender-neutral language. Do not use gendered pronouns such as he or she; use they, the person, the individual, or similar terms.
 1. FILTER STRICTLY: The data above may contain lists of multiple items.
 2. SELECT ONLY: Extract *only* the specific information that answers the User Question.
 3. IGNORE OTHERS: If the data lists "Item A, Item B" and the user asked about "Item B", DO NOT mention A.
@@ -90,7 +91,7 @@ RETRIEVED KNOWLEDGE BASE DATA:
 
 Your Response:"""
         
-        await self.generate_response(prompt, 0.4, RESPONSE_MAX_TOKENS)
+        await self.generate_response(prompt, 0.2, RESPONSE_MAX_TOKENS)
 
     async def _handle_chat_fallback(self, user_message: str, error_message: str = None):
         # If error is just "No results", be helpful.
