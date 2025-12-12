@@ -1,11 +1,10 @@
+import streamlit as st
 import asyncio
 import json
-import sys
-import time
+import ollama
 from typing import Optional, Dict, Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-import ollama
 
 from config import (
     LLM_MODEL, TOOL_SELECTION_TEMPERATURE, RESPONSE_TEMPERATURE,
@@ -13,7 +12,33 @@ from config import (
     CHAT_MAX_TOKENS, TOP_P, ENABLE_STREAMING
 )
 
-class MCPClient:
+# --- Streamlit Page Config ---
+st.set_page_config(
+    page_title="BMSCE Assistant",
+    page_icon="🎓",
+    layout="centered"
+)
+
+# --- Custom CSS for Chat Interface ---
+st.markdown("""
+<style>
+    .stChatMessage {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .stChatMessage[data-testid="stChatMessageUser"] {
+        background-color: #f0f2f6;
+    }
+    .stChatMessage[data-testid="stChatMessageAssistant"] {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- MCP Client Class (Adapted for Streamlit) ---
+class StreamlitMCPClient:
     def __init__(self):
         self.session: Optional[ClientSession] = None
         self.available_tools = []
@@ -39,7 +64,7 @@ class MCPClient:
         await self.session.initialize()
         response = await self.session.list_tools()
         self.available_tools = response.tools
-        print(f"✅ Connected to MCP Server\n")
+        # print(f"✅ Connected to MCP Server")
 
     async def process_tool_call(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
         if not self.session:
@@ -48,29 +73,14 @@ class MCPClient:
         return result.content[0].text
 
     async def generate_response(self, prompt: str, temperature: float, max_tokens: int):
-        if ENABLE_STREAMING:
-            try:
-                stream = ollama.generate(
-                    model=LLM_MODEL, prompt=prompt, stream=True,
-                    options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
-                )
-                for chunk in stream:
-                    if 'response' in chunk:
-                        print(chunk['response'], end='', flush=True)
-                print("\n")
-            except Exception as e:
-                print(f"Streaming error: {e}. Fallback to non-streaming.")
-                response = ollama.generate(
-                    model=LLM_MODEL, prompt=prompt,
-                    options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
-                )
-                print(f"{response['response'].strip()}\n")
-        else:
-            response = ollama.generate(
-                model=LLM_MODEL, prompt=prompt,
-                options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
-            )
-            print(f"{response['response'].strip()}\n")
+        # Use streaming with Ollama
+        stream = ollama.generate(
+            model=LLM_MODEL, prompt=prompt, stream=ENABLE_STREAMING,
+            options={"temperature": temperature, "top_p": TOP_P, "num_predict": max_tokens}
+        )
+        for chunk in stream:
+            if 'response' in chunk:
+                yield chunk['response']
 
     async def make_natural_response(self, user_query: str, raw_data: str):
         # --- UNIVERSAL STRICT FILTERING PROMPT ---
@@ -92,19 +102,21 @@ RETRIEVED KNOWLEDGE BASE DATA:
 
 Your Response:"""
         
-        await self.generate_response(prompt, 0.2, RESPONSE_MAX_TOKENS)
+        # Return the generator directly
+        return self.generate_response(prompt, RESPONSE_TEMPERATURE, RESPONSE_MAX_TOKENS)
 
     async def _handle_chat_fallback(self, user_message: str, error_message: str = None):
         # If error is just "No results", be helpful.
         if error_message and "found" in error_message.lower():
-             print("I checked my database, but I couldn't find that specific information.\n")
-             return
+             async def simple_gen():
+                 yield "I checked my database, but I couldn't find that specific information."
+             return simple_gen()
 
         chat_prompt = f"""You are BMSCE Assistant.
     User: {user_message}
     Respond warmly and concisely. No markdown unless necessary.
     Response:"""
-        await self.generate_response(chat_prompt, CHAT_TEMPERATURE, CHAT_MAX_TOKENS)
+        return self.generate_response(chat_prompt, CHAT_TEMPERATURE, CHAT_MAX_TOKENS)
 
     def _sanitize_tool_args(self, tool_name: str, tool_args: dict, user_message: str) -> dict:
         """
@@ -118,8 +130,6 @@ Your Response:"""
             
             if 'search_term' not in tool_args:
                 # Fallback: Use the whole user message as search term if missing
-                # This captures "Software Engineering" from "Is there software engineering"
-                # removing common stop words roughly
                 clean_term = user_message.lower().replace("is there", "").replace("any", "").replace("subject", "").strip()
                 tool_args['search_term'] = clean_term
 
@@ -132,14 +142,25 @@ Your Response:"""
 
         return tool_args
 
-    async def chat_with_mistral(self, user_message: str):
+    def _extract_tool_call(self, text: str) -> Optional[dict]:
+        try:
+            text = text.replace('```json', '').replace('```', '').strip()
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start != -1 and end > start:
+                return json.loads(text[start:end])
+        except:
+            pass
+        return None
+
+    async def process_message(self, user_message: str):
         # Decision prompt 
         decision_prompt = f"""Analyze the user's question and select the BEST tool.
 
 Tools:
 1. get_latest_news - news, events
 2. get_college_notifications - official notices
-3. query_knowledge_base - generic search (clubs, rules, history, campus, hostels). Usage: {{"tool": "query_knowledge_base", "arguments": {{"query_text": "search query"}}}}
+3. query_knowledge_base - generic search (placements,recruiting companies,clubs, rules, history, campus, hostels). Usage: {{"tool": "query_knowledge_base", "arguments": {{"query_text": "search query"}}}}
 4. get_professor_details - email/phone of profs (requires "name")
 5. get_syllabus_info - syllabus/subjects. Usage:
    - "subjects in 5th sem" -> {{"tool": "get_syllabus_info", "arguments": {{"query_type": "semester_list", "search_term": "5"}}}}
@@ -160,27 +181,22 @@ JSON:"""
         tool_call = self._extract_tool_call(decision_response['response'])
         
         if not tool_call or tool_call.get('tool') == 'none':
-            await self._handle_chat_fallback(user_message)
-            return
+            return await self._handle_chat_fallback(user_message)
 
         tool_name = tool_call.get('tool')
         tool_args = tool_call.get('arguments', {})
 
-        # --- NEW STEP: Sanitize Arguments ---
-        # This fixes the "Missing arguments" crash by auto-filling missing keys
+        # Sanitize Arguments
         tool_args = self._sanitize_tool_args(tool_name, tool_args, user_message)
 
-        # Strict Validation (Last Line of Defense)
+        # Strict Validation
         required_args = self.tool_arg_map.get(tool_name)
         if required_args and not all(arg in tool_args and tool_args[arg] for arg in required_args):
-            print(f"⚠️ Missing arguments for {tool_name} even after sanitization. Fallback to chat.\n")
-            await self._handle_chat_fallback(user_message, "Missing args")
-            return
+            return await self._handle_chat_fallback(user_message, "Missing args")
 
         try:
-            print("🔍 Searching...", end='', flush=True)
+            # st.info(f"Using tool: {tool_name}") # Optional: Show tool usage
             raw_data = await self.process_tool_call(tool_name, tool_args)
-            print("\r" + " " * 20 + "\r", end='', flush=True)
             
             # Basic error checking
             is_error = False
@@ -188,7 +204,6 @@ JSON:"""
                 data_json = json.loads(raw_data)
                 if isinstance(data_json, dict) and ('error' in data_json):
                     is_error = True
-                    # If "ambiguous" or "tips", it's not a hard error, let LLM explain
                     if "ambiguous" in str(data_json.get('error')).lower() or "tip" in str(data_json): 
                         is_error = False 
                 elif isinstance(data_json, list) and len(data_json) == 0:
@@ -197,47 +212,71 @@ JSON:"""
                 pass
             
             if is_error:
-                print(f"🤔 The search didn't return a result.")
-                await self._handle_chat_fallback(user_message, raw_data)
-                return
+                return await self._handle_chat_fallback(user_message, raw_data)
 
-            await self.make_natural_response(user_message, raw_data)
+            return await self.make_natural_response(user_message, raw_data)
 
         except Exception as e:
-            print(f"Oops! Trouble getting info. {e}\n")
-            await self.make_natural_response(user_message, f"Error: {e}")
-
-    def _extract_tool_call(self, text: str) -> Optional[dict]:
-        try:
-            text = text.replace('```json', '').replace('```', '').strip()
-            start = text.find('{')
-            end = text.rfind('}') + 1
-            if start != -1 and end > start:
-                return json.loads(text[start:end])
-        except:
-            pass
-        return None
+            async def error_gen():
+                yield f"Error: {e}"
+            return error_gen()
 
     async def close(self):
         if self.session_context: await self.session_context.__aexit__(None, None, None)
         if self.client_context: await self.client_context.__aexit__(None, None, None)
 
-async def main():
-    client = MCPClient()
-    print("\n🎓 BMSCE Assistant (Robust & Universal) 🤖\n")
-    try:
-        await client.connect_to_server("main.py")
-        while True:
-            user_input = input("You: ").strip()
-            if user_input.lower() in ['quit', 'exit']: break
-            if not user_input: continue
-            print()
-            await client.chat_with_mistral(user_input)
-            print("─" * 60 + "\n")
-    except Exception as e:
-        print(f"FATAL ERROR: {e}")
-    finally:
-        await client.close()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# --- Main App Logic ---
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+st.title("🎓 BMSCE Assistant")
+st.caption("Ask me about syllabus, professors, news, or campus details!")
+
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Handle input
+if prompt := st.chat_input("How can I help you?"):
+    # Add user message to history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Generate response
+    with st.chat_message("assistant"):
+        # Placeholder for streaming
+        response_placeholder = st.empty()
+        
+        async def run_chat():
+            client = StreamlitMCPClient()
+            try:
+                await client.connect_to_server("main.py")
+                # process_message now returns an async generator
+                response_gen = await client.process_message(prompt)
+                
+                # st.write_stream consumes the generator
+                # Note: st.write_stream works with sync generators or iterables. 
+                # For async generators, we need to bridge it or collect chunks.
+                # Streamlit's write_stream supports async generators in newer versions, 
+                # but to be safe and simple, let's iterate and update.
+                
+                full_response = ""
+                # We need to iterate the async generator
+                async for chunk in response_gen:
+                    full_response += chunk
+                    response_placeholder.markdown(full_response + "▌")
+                
+                response_placeholder.markdown(full_response)
+                return full_response
+
+            finally:
+                await client.close()
+        
+        response_text = asyncio.run(run_chat())
+    
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": response_text})

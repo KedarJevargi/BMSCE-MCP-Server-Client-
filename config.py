@@ -47,7 +47,7 @@ TOOL_SELECTION_TEMPERATURE = 0.05
 
 # Temperature for natural responses (higher = more creative)
 # Recommended: 0.6 - 0.8
-RESPONSE_TEMPERATURE = 0.7
+RESPONSE_TEMPERATURE = 0.2
 
 # Temperature for casual chat (higher = more natural)
 # Recommended: 0.7 - 0.9

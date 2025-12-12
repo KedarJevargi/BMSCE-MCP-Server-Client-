@@ -124,7 +124,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     
     # Add PDFs to vector database
-    pdf_files = [""]
+    pdf_files = ["Data/hostel_rule.pdf"]
     for pdf in pdf_files:
         if os.path.exists(pdf):
             add_pdf_to_vectordb(pdf)
